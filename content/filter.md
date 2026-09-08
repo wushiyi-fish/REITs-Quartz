@@ -49,7 +49,7 @@ layout: "page"
 
   document.addEventListener('DOMContentLoaded', function() {
     // 加载 Quartz 生成的 index.json
-    fetch('/contentIndex.json')
+    fetch('/content/contentIndex.json')
       .then(response => {
         if (!response.ok) throw new Error('无法加载 index.json');
         return response.json();
