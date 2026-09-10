@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>REITs 文件筛选</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; margin: 0; background: #f8f9fa; color: #212529; }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 24px; }
+    h1 { margin: 0 0 8px; font-size: 26px; }
+    .subtitle { color: #666; margin-bottom: 20px; font-size: 14px; }
+    .filters { display: flex; flex-wrap: wrap; gap: 14px; background: #fff; padding: 18px; border-radius: 10px; border: 1px solid #e9ecef; margin-bottom: 20px; align-items: flex-end; }
+    .field { display: flex; flex-direction: column; gap: 6px; }
+    label { font-size: 13px; font-weight: 600; color: #495057; }
+    select, input { padding: 8px 12px; border: 1px solid #ced4da; border-radius: 6px; min-width: 150px; font-size: 14px; background: #fff; }
+    button { padding: 8px 20px; background: #e63946; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; height: 38px; }
+    button:hover { opacity: .92; }
+    .stats { font-size: 13px; color: #6c757d; margin-bottom: 12px; }
+    .results { display: grid; gap: 10px; }
+    .card { display: flex; justify-content: space-between; align-items: center; background: #fff; border: 1px solid #e9ecef; border-radius: 8px; padding: 12px 16px; transition: box-shadow .15s; }
+    .card:hover { box-shadow: 0 2px 8px rgba(0,0,0,.06); }
+    .card a { color: #e63946; text-decoration: none; font-weight: 500; font-size: 15px; word-break: break-all; }
+    .card a:hover { text-decoration: underline; }
+    .meta { font-size: 12px; color: #868e96; white-space: nowrap; margin-left: 12px; }
+    .empty { color: #868e96; padding: 20px; text-align: center; background: #fff; border-radius: 8px; border: 1px dashed #dee2e6; }
+    .error { color: #c92a2a; background: #fff5f5; border: 1px solid #ffa8a8; padding: 16px; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>📂 REITs 文件筛选</h1>
+    <p class="subtitle">通过 领域 / 业态 / 交易所 / 披露时间 等维度筛选文件</p>
+
+    <div class="filters">
+      <div class="field"><label>领域</label><select id="area"><option value="">全部</option></select></div>
+      <div class="field"><label>业态</label><select id="sector"><option value="">全部</option></select></div>
+      <div class="field"><label>交易所</label><select id="exchange"><option value="">全部</option></select></div>
+      <div class="field"><label>年份</label><select id="year"><option value="">全部</option></select></div>
+      <div class="field"><label>关键词</label><input id="keyword" type="text" placeholder="输入基金简称…" /></div>
+      <button onclick="resetFilters()">重置</button>
+    </div>
+
+    <div class="stats" id="stats"></div>
+    <div class="results" id="results"></div>
+  </div>
+
+  <script>
+    let data = [];
+    const dom = {
+      area: document.getElementById('area'),
+      sector: document.getElementById('sector'),
+      exchange: document.getElementById('exchange'),
+      year: document.getElementById('year'),
+      keyword: document.getElementById('keyword'),
+      stats: document.getElementById('stats'),
+      results: document.getElementById('results')
+    };
+
+    async function init() {
+      try {
+        const res = await fetch('/filter-data.json');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const json = await res.json();
+        data = json.files || [];
+        if (!data.length) throw new Error('暂无数据');
+        fillOptions();
+        applyFilters();
+        [dom.area, dom.sector, dom.exchange, dom.year].forEach(el => el.addEventListener('change', applyFilters));
+        dom.keyword.addEventListener('input', debounce(applyFilters, 200));
+      } catch (e) {
+        dom.results.innerHTML = `<div class="error">加载失败：${e.message}<br><small>请确认 package.json 的 prebuild 包含 <code>node scripts/generate-filter-data.mjs</code></small></div>`;
+      }
+    }
+
+    function unique(key) {
+      return Array.from(new Set(data.map(x => x[key]).filter(Boolean))).sort();
+    }
+    function fillOptions() {
+      unique('area').forEach(v => dom.area.add(new Option(v, v)));
+      unique('sector').forEach(v => dom.sector.add(new Option(v, v)));
+      unique('exchange').forEach(v => dom.exchange.add(new Option(v, v)));
+      unique('year').forEach(v => dom.year.add(new Option(v, v)));
+    }
+    function debounce(fn, ms) {
+      let t; return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+    }
+    function resetFilters() {
+      [dom.area, dom.sector, dom.exchange, dom.year, dom.keyword].forEach(el => el.value = '');
+      applyFilters();
+    }
+    function applyFilters() {
+      const area = dom.area.value, sector = dom.sector.value, exchange = dom.exchange.value, year = dom.year.value, kw = dom.keyword.value.trim().toLowerCase();
+      const out = data.filter(f => {
+        if (area && f.area !== area) return false;
+        if (sector && f.sector !== sector) return false;
+        if (exchange && f.exchange !== exchange) return false;
+        if (year && f.year !== year) return false;
+        if (kw && !(f.title + f.name).toLowerCase().includes(kw)) return false;
+        return true;
+      });
+      dom.stats.textContent = `找到 ${out.length} 个文件（共 ${data.length} 个）`;
+      dom.results.innerHTML = out.length ? out.sort((a,b)=>a.title.localeCompare(b.title,'zh')).map(render).join('') : '<div class="empty">没有匹配的文件</div>';
+    }
+    function render(f) {
+      const tags = [f.area, f.sector, f.exchange, f.date].filter(Boolean).join(' · ');
+      return `<div class="card"><a href="${f.url}" target="_top">${f.title}</a><span class="meta">${tags}</span></div>`;
+    }
+    init();
+  </script>
+</body>
+</html>
