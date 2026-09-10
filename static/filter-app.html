@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>REITs 文件筛选</title>
+<style>
+  :root {
+    --red: #c0392b;
+    --red-soft: #fdecea;
+    --border: #e5e5e5;
+    --text: #2b2b2b;
+    --muted: #888;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: var(--text);
+    background: #fff;
+  }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 28px 20px 60px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 14px; margin-bottom: 22px; }
+  .bar {
+    display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-end;
+    background: #faf8f8; border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px; margin-bottom: 18px;
+  }
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  .field label { font-size: 13px; font-weight: 600; color: #4e4e4e; }
+  select, input[type="text"] {
+    padding: 8px 12px; border: 1px solid #ccc; border-radius: 6px;
+    min-width: 150px; font-size: 14px; background: #fff; color: var(--text);
+  }
+  input[type="text"] { min-width: 220px; }
+  select:focus, input:focus { outline: none; border-color: var(--red); box-shadow: 0 0 0 2px rgba(192,57,43,.15); }
+  button {
+    padding: 9px 22px; border: none; border-radius: 6px; cursor: pointer;
+    font-size: 14px; font-weight: 600;
+  }
+  .btn-reset { background: #6c757d; color: #fff; }
+  .btn-reset:hover { opacity: .88; }
+  .stats { font-size: 13px; color: var(--muted); margin-bottom: 12px; }
+  .stats b { color: var(--red); }
+  .list { display: grid; gap: 8px; }
+  .card {
+    display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    padding: 11px 16px; background: #fff; border: 1px solid var(--border);
+    border-left: 3px solid var(--red); border-radius: 8px;
+  }
+  .card a { color: #1a73e8; text-decoration: none; font-weight: 600; font-size: 15px; }
+  .card a:hover { text-decoration: underline; }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; flex-shrink: 0; }
+  .tag {
+    font-size: 12px; color: #555; background: #f2f2f2; border-radius: 4px;
+    padding: 2px 8px; white-space: nowrap;
+  }
+  .tag.empty { color: #bbb; background: #fafafa; }
+  .empty-msg { color: #999; padding: 20px; text-align: center; }
+  .err { color: #c0392b; padding: 16px; border: 1px solid var(--red-soft); background: var(--red-soft); border-radius: 8px; }
+  @media (max-width: 640px) {
+    .card { flex-direction: column; align-items: flex-start; }
+    select, input[type="text"] { min-width: 100%; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📂 REITs 文件筛选</h1>
+  <div class="sub">按 领域 / 业态 / 交易所 / 披露时间 维度筛选，或输入关键词检索。</div>
+
+  <div class="bar">
+    <div class="field">
+      <label>领域</label>
+      <select id="f-area"><option value="">全部</option></select>
+    </div>
+    <div class="field">
+      <label>业态</label>
+      <select id="f-sector"><option value="">全部</option></select>
+    </div>
+    <div class="field">
+      <label>交易所</label>
+      <select id="f-exchange"><option value="">全部</option></select>
+    </div>
+    <div class="field">
+      <label>披露时间（年）</label>
+      <select id="f-year"><option value="">全部</option></select>
+    </div>
+    <div class="field">
+      <label>关键词检索</label>
+      <input type="text" id="f-q" placeholder="基金名称 / 标题…" />
+    </div>
+    <button class="btn-reset" id="f-reset">重置</button>
+  </div>
+
+  <div class="stats" id="stats"></div>
+  <div class="list" id="list"></div>
+</div>
+
+<script>
+  const ENDPOINTS = ['/filter-data.json', '/static/filter-data.json'];
+  let DATA = [];
+
+  function uniq(arr) {
+    return [...new Set(arr.filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+  }
+
+  function fillSelect(id, values) {
+    const sel = document.getElementById(id);
+    const def = sel.querySelector('option[value=""]');
+    sel.innerHTML = '';
+    if (def) sel.appendChild(def);
+    values.forEach((v) => {
+      const o = document.createElement('option');
+      o.value = v; o.textContent = v;
+      sel.appendChild(o);
+    });
+  }
+
+  function render() {
+    const area = document.getElementById('f-area').value;
+    const sector = document.getElementById('f-sector').value;
+    const exchange = document.getElementById('f-exchange').value;
+    const year = document.getElementById('f-year').value;
+    const q = document.getElementById('f-q').value.trim().toLowerCase();
+
+    const res = DATA.filter((f) => {
+      if (area && f.area !== area) return false;
+      if (sector && f.sector !== sector) return false;
+      if (exchange && f.exchange !== exchange) return false;
+      if (year && f.year !== year) return false;
+      if (q) {
+        const hay = (f.title + ' ' + f.name + ' ' + [f.area, f.sector, f.exchange, f.docType, f.version].join(' ')).toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+
+    document.getElementById('stats').innerHTML = `找到 <b>${res.length}</b> 个文件（共 ${DATA.length} 个）`;
+
+    const list = document.getElementById('list');
+    if (!res.length) {
+      list.innerHTML = '<div class="empty-msg">没有匹配的文件，试试放宽筛选条件。</div>';
+      return;
+    }
+    res.sort((a, b) => (b.date || '').localeCompare(a.date || '') || a.name.localeCompare(b.name, 'zh-Hans-CN'));
+    list.innerHTML = res.map((f) => {
+      const tags = [f.area, f.sector, f.exchange, f.docType, f.version, f.date].map((t) =>
+        t ? `<span class="tag">${t}</span>` : ''
+      ).join('');
+      return `<div class="card">
+        <a href="${f.url}" target="_blank" rel="noopener">${f.title}</a>
+        <div class="tags">${tags}</div>
+      </div>`;
+    }).join('');
+  }
+
+  async function load() {
+    let json = null, lastErr = null;
+    for (const ep of ENDPOINTS) {
+      try {
+        const r = await fetch(ep);
+        if (r.ok) { json = await r.json(); break; }
+      } catch (e) { lastErr = e; }
+    }
+    if (!json) {
+      document.getElementById('list').innerHTML =
+        `<div class="err">无法加载筛选数据（filter-data.json）。请确认构建时生成了该文件，且页面通过 Cloudflare 站点根路径访问。<br>错误：${lastErr ? lastErr.message : '未知'}</div>`;
+      return;
+    }
+    DATA = (json.files || []).map((f) => ({
+      ...f,
+      area: f.area || '未分类',
+      sector: f.sector || '未分类',
+      exchange: f.exchange || '未分类',
+      year: f.year || '',
+      date: f.date || '',
+    }));
+    if (!DATA.length) {
+      document.getElementById('list').innerHTML = '<div class="empty-msg">数据为空，请检查 content 目录。</div>';
+      return;
+    }
+    fillSelect('f-area', uniq(DATA.map((f) => f.area)));
+    fillSelect('f-sector', uniq(DATA.map((f) => f.sector)));
+    fillSelect('f-exchange', uniq(DATA.map((f) => f.exchange)));
+    fillSelect('f-year', uniq(DATA.map((f) => f.year)).reverse());
+    ['f-area', 'f-sector', 'f-exchange', 'f-year'].forEach((id) =>
+      document.getElementById(id).addEventListener('change', render)
+    );
+    document.getElementById('f-q').addEventListener('input', render);
+    document.getElementById('f-reset').addEventListener('click', () => {
+      ['f-area', 'f-sector', 'f-exchange', 'f-year'].forEach((id) => (document.getElementById(id).value = ''));
+      document.getElementById('f-q').value = '';
+      render();
+    });
+    render();
+  }
+
+  load();
+</script>
+</body>
+</html>
