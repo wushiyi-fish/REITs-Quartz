@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url'
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(__dirname, '..')
 const contentDir = path.join(repoRoot, 'content')
-const outDir = path.join(repoRoot, 'static')
+const outDir = path.join(repoRoot, 'quartz', 'static')
 const outFile = path.join(outDir, 'filter-data.json')
 
 const IGNORE_DIRS = new Set(['private', 'templates', '.obsidian', '.git'])
