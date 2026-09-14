@@ -1,0 +1,81 @@
+# ============================================================
+# 把"构建"搬到 GitHub Actions，构建完成后只把成品（public/）
+# 上传到 Cloudflare Pages。
+#
+# 放进仓库的位置：  .github/workflows/deploy-cloudflare.yml
+# 触发时机：        push 到 v5 分支时自动跑；也可以在 Actions 页面手动 Run workflow
+#
+# 前置条件（缺一不可）：
+#   1) Cloudflare 里已关闭该项目的自动构建（Branch control）
+#   2) GitHub 仓库已添加两个 Secret：
+#        CLOUDFLARE_ACCOUNT_ID  = d69fc0bf9ad8ab6c157438259f63779b
+#        CLOUDFLARE_API_TOKEN   = 你创建的 Pages 部署令牌
+# ============================================================
+
+name: Build Quartz and Deploy to Cloudflare Pages
+
+on:
+  push:
+    branches:
+      - v5
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  deployments: write
+
+# 同一时间只跑一个部署；连续 push 时自动取消上一次未跑完的，避免排队
+concurrency:
+  group: cloudflare-pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: 1. 拉取仓库
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: 2. 安装 Node.js（24，满足 Quartz v5 要求）
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: "npm"
+
+      - name: 3. 安装依赖
+        # npm ci 更快更稳；万一 package-lock.json 与 package.json 不同步，自动退回 npm install
+        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
+      - name: 4. 构建站点
+        # npm run build 会自动依次执行：
+        #   prebuild  -> 安装 Quartz 插件 + 生成 filter-data.json
+        #   build     -> Quartz 渲染全部内容
+        #   postbuild -> shrink-index.mjs 压缩超大索引文件
+        run: npm run build
+        env:
+          # 内容总量约 1GB，给 Node 足够堆内存，避免 OOM
+          NODE_OPTIONS: "--max-old-space-size=8192"
+
+      - name: 5. 体检：输出体积 / 文件数 / 超限文件
+        run: |
+          echo "== public 总体积 =="
+          du -sh public
+          echo ""
+          echo "== public 文件总数（Cloudflare Pages 上限 20000）=="
+          find public -type f | wc -l
+          echo ""
+          echo "== 单个文件超过 25MiB 的清单（此项若不为空，部署会被拒绝）=="
+          find public -type f -size +25M -printf '%s\t%p\n' || true
+          echo "== 体检结束 =="
+
+      - name: 6. 上传到 Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy public --project-name=reits-quartz --branch=v5 --commit-dirty=true
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
