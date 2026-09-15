@@ -1,9 +1,19 @@
 # ============================================================
-# 把"构建"搬到 GitHub Actions，构建完成后只把成品（public/）
-# 上传到 Cloudflare Pages。
+# 阶段 1 修复版：解决构建被系统强杀（OOM，日志里的 "Killed"）
 #
-# 放进仓库的位置：  .github/workflows/deploy-cloudflare.yml
-# 触发时机：        push 到 v5 分支时自动跑；也可以在 Actions 页面手动 Run workflow
+# 放置位置：  .github/workflows/deploy-cloudflare.yml   （覆盖上一版）
+# 触发时机：  推送 content/ 等内容到 v5 分支；也可在 Actions 页面手动 Run workflow
+#
+# 上一版有什么问题：
+#   1) NODE_OPTIONS=8192 让 Node 可以涨到 8GB 才做回收；而 Quartz 解析阶段会开
+#      多个 worker 线程（每个线程是独立的内存堆），叠加后把 16GB 的构建机打穿，
+#      内核直接 SIGKILL（日志里就是一个光秃秃的 "Killed"）。
+#      → 本版加 --concurrency=1，强制单进程单堆；8192 的堆上限保留，
+#        但这样它的作用变成"到 8GB 就报可读的堆错误"，而不是被内核静默杀掉。
+#   2) fetch-depth: 0 会把整个历史都拉下来（你的 content 有 1GB），纯浪费。
+#      → 本版改回 1：只要有最新快照就够构建。
+#   3) 没有内存采样，失败后无法定位。
+#      → 本版每 20 秒记录一次内存，失败时自动抓内核 OOM 证据。
 #
 # 前置条件（缺一不可）：
 #   1) Cloudflare 里已关闭该项目的自动构建（Branch control）
@@ -18,13 +28,23 @@ on:
   push:
     branches:
       - v5
+    # 只有这些文件变了才重新构建，避免改个 README 也跑一次 40 分钟
+    paths:
+      - "content/**"
+      - "quartz/**"
+      - "scripts/**"
+      - "quartz.config.default.yaml"
+      - "quartz.ts"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/deploy-cloudflare.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
   deployments: write
 
-# 同一时间只跑一个部署；连续 push 时自动取消上一次未跑完的，避免排队
+# 同一时间只跑一个；连续 push 时后一次会取消前一次
 concurrency:
   group: cloudflare-pages-${{ github.ref }}
   cancel-in-progress: true
@@ -33,34 +53,68 @@ jobs:
   build-and-deploy:
     name: Build and deploy
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # 单线程构建会更慢，给足时间（公开仓库不计费，但单 job 上限 6 小时）
+    timeout-minutes: 180
     steps:
-      - name: 1. 拉取仓库
+      - name: 1. 拉取仓库（只要最新快照，克隆更快）
         uses: actions/checkout@v6
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: 2. 安装 Node.js（24，满足 Quartz v5 要求）
+      - name: 2. 安装 Node.js（24）
         uses: actions/setup-node@v6
         with:
           node-version: "24"
           cache: "npm"
 
-      - name: 3. 安装依赖
-        # npm ci 更快更稳；万一 package-lock.json 与 package.json 不同步，自动退回 npm install
+      - name: 3. 环境体检
+        run: |
+          echo "== 这台构建机的资源上限 =="
+          echo "CPU 核数: $(nproc)"
+          free -h
+          df -h / | tail -1
+
+      - name: 4. 安装依赖
         run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
 
-      - name: 4. 构建站点
-        # npm run build 会自动依次执行：
-        #   prebuild  -> 安装 Quartz 插件 + 生成 filter-data.json
-        #   build     -> Quartz 渲染全部内容
-        #   postbuild -> shrink-index.mjs 压缩超大索引文件
-        run: npm run build
+      - name: 5. 构建站点（单线程 + 内存采样）
         env:
-          # 内容总量约 1GB，给 Node 足够堆内存，避免 OOM
+          # 到 8GB 就让 Node 自己报错，不要让它把整台机器拖死
           NODE_OPTIONS: "--max-old-space-size=8192"
+        run: |
+          set +e
+          # 后台每 20 秒记录一次内存
+          ( while true; do
+              printf '%s  ' "$(date +%H:%M:%S)"
+              free -m | awk '/^Mem:/{printf "used=%sMB avail=%sMB  ", $3, $7}'
+              ps -eo rss,comm | awk '$2=="node"{s+=$1} END{printf "node_rss=%dMB\n", s/1024}'
+              sleep 20
+            done ) > /tmp/mem.log 2>&1 &
+          MON=$!
 
-      - name: 5. 体检：输出体积 / 文件数 / 超限文件
+          npm run build -- --concurrency=1
+          RC=$?
+
+          kill $MON 2>/dev/null
+          echo ""
+          echo "===== 内存采样（每 20 秒一行，末 30 行）====="
+          tail -30 /tmp/mem.log
+          echo "===== 构建退出码: $RC （137 = 被内核强杀）====="
+          exit $RC
+
+      - name: 6. 失败取证：确认是不是内存被强杀
+        if: failure()
+        run: |
+          echo "== 内核是否记录到 OOM 强杀 =="
+          sudo dmesg -T 2>/dev/null | grep -iE "out of memory|killed process|oom-kill" | tail -20 || echo "（内核没有 OOM 记录）"
+          echo ""
+          echo "== 采样曲线的最后 40 行 =="
+          tail -40 /tmp/mem.log 2>/dev/null || echo "（没有采样文件）"
+          echo ""
+          echo "== 磁盘与内存现状 =="
+          free -h; df -h /
+
+      - name: 7. 体检：输出体积 / 文件数 / 超限文件
         run: |
           echo "== public 总体积 =="
           du -sh public
@@ -72,7 +126,7 @@ jobs:
           find public -type f -size +25M -printf '%s\t%p\n' || true
           echo "== 体检结束 =="
 
-      - name: 6. 上传到 Cloudflare Pages
+      - name: 8. 上传到 Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
